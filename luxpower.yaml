@@ -1,0 +1,1031 @@
+esphome:
+  name: luxpower
+  friendly_name: Luxpower
+  on_boot:
+    - priority: -100
+      then:
+        - light.turn_on:
+            id: atom_light
+        - light.control:
+            id: atom_light
+            effect: "Breathing Effect"
+
+esp32:
+  # platform: ESP32
+  board: m5stack-atom
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+  #level: INFO
+  logs:
+    light: NONE
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: !secret api_password
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Luxpower Fallback Hotspot"
+    password: !secret hotspot_password
+
+captive_portal:
+
+uart:
+  - id: uart_modbus_inverter_1
+    tx_pin: GPIO19
+    rx_pin: GPIO22
+    baud_rate: 19200
+    stop_bits: 1
+    parity: NONE
+    data_bits: 8
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+  - platform: sntp
+    # ...
+    on_time:
+      # Every morning 
+      - seconds: 0
+        minutes: 5
+        hours: 3
+        days_of_week: SUN
+        then:
+          if:
+            condition:
+              time.has_time:
+            then:
+              - logger.log: Time has been set and is valid!
+              - button.press: sync_time
+              # - lambda: |-
+              #     char str[30];
+              #     time_t now = id(homeassistant_time).now().timestamp;
+              #     strftime(str, sizeof(str), "%Y-%m-%d %H:%M:%S", localtime(&now));    
+              #     id(time_last_synced).publish_state(str);
+              
+globals:
+  - id: battery_health_int
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: conn_error
+    type: bool
+    restore_value: no
+    initial_value: '0'
+
+modbus:
+  - uart_id: uart_modbus_inverter_1
+    id: modbus_inverter_1
+    #flow_control_pin: GPIO21
+
+modbus_controller:
+  - id: inverter_1
+    address: 1
+    update_interval: 30s
+    modbus_id: modbus_inverter_1
+    # on_command_sent:
+    #   then:
+    #   - lambda: |-
+    #       ESP_LOGD("modbus sent", "Register %d, function code %d", address, function_code);
+
+#binary_sensor:
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "AC Couple Enabled"
+#    register_type: read
+#    address: 77
+#    bitmask: 0x02 #(bit 8)
+#    entity_category: diagnostic
+
+sensor:
+  - platform: internal_temperature
+    name: "ESP32 Internal Temperature"
+    device_class: temperature
+    entity_category: diagnostic
+    unit_of_measurement: °C
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Working Mode"
+    id: state
+    register_type: read
+    address: 0
+    internal: True
+    on_value:
+      lambda: |-
+        uint16_t word = static_cast<uint16_t>(x);
+        //char status[30];
+        std::string status;
+        if(word == 0x0000){
+          status = "Standby";
+        }
+        else if(word == 0x0001){
+          status = "Fault";
+        }
+        else if (word == 0x08){
+          status = "PV charging";
+        }
+        else if(word == 0x000C){
+            status = "PV charging connected to the grid";
+        }
+        else if(word == 0x0010){
+          status = "The battery connected to the grid";
+        }
+        else if(word == 0x0014){
+            status = "(PV + battery) connected to the grid";
+        }
+        else if(word == 0x0020){
+            status = "AC charging";
+        }
+        else if(word == 0x0028){
+            status = "(PV+AC) charging";
+        }
+        else if(word == 0x0040){
+            status = "off-grid mode, battery discharge";
+        }
+        else if(word == 0x0060){
+            status = "Off-grid + battery charging";
+        }
+        else if(word == 0x0080){
+            status = "PV power fluctuates randomly";
+        }
+        else if(word == 0x00C0){
+            status = "(PV+ battery) off-grid";
+        }
+        else if(word == 0x0088){
+            status = "PV charging + off-grid";
+        }
+        else {
+          char buffer[10];
+          snprintf(buffer, sizeof(buffer), "%04x", word);
+          status = buffer;
+        }
+        id(status_string).publish_state(status);
+
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV1 Voltage"
+    id: pv1_volt
+    register_type: read
+    address: 1
+    unit_of_measurement: "V"
+    state_class: measurement
+    accuracy_decimals: 1
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters: 
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV2 Voltage"
+    id: pv2_volt
+    register_type: read
+    address: 2
+    register_count: 2
+    unit_of_measurement: "V"
+    state_class: measurement
+    accuracy_decimals: 1
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters: 
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Battery Voltage"
+    id: vbat
+    register_type: read
+    address: 4
+    unit_of_measurement: "V"
+    state_class: measurement
+    accuracy_decimals: 1
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters: 
+      - multiply: 0.1
+#      - lambda: return x * 10;
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Battery State of Charge"
+    id: bat_soc
+    register_type: read
+    address: 5
+    register_count: 2
+    #bitmask: 0xFF
+    unit_of_measurement: "%"
+    state_class: measurement
+    device_class: battery
+    #accuracy_decimals: 1
+    value_type: U_WORD
+    lambda: |-
+      uint16_t word = static_cast<int>(x);
+      id(battery_health_int) = (word >> 8) & 0xFF;
+      ESP_LOGD("Battery", "Battery Register is 0X%X, SOH byte = %d, and SOC byte = %d", word, id(battery_health_int), word & 0xFF);
+      return word & 0xFF;
+    on_value:
+      lambda: |-
+        //uint16_t word = static_cast<int>(x);
+        id(battery_health).publish_state(id(battery_health_int));
+
+  - platform: template
+    name: "Battery Health"
+    id: battery_health
+    unit_of_measurement: "%"
+    state_class: measurement
+    device_class: battery
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    #lambda: |-
+    #  return id(battery_health_int);
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV 1 Power"
+    id: pv1_pow
+    register_type: read
+    address: 7
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV 2 Power"
+    id: pv2_pow
+    register_type: read
+    address: 8
+    register_count: 2
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+    on_value:
+      - lambda: |-
+          // Code to update the template sensor using the new value
+          id(pv_total_pow).publish_state(id(pv1_pow).state + x); 
+  
+  - platform: template
+    id: pv_total_pow
+    name: "PV Total Power"
+    #lambda: |-
+    #  return (id(pv1_pow).state + id(pv2_pow).state);
+    #update_interval: 5s
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    accuracy_decimals: 0
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Battery Charge"
+    id: bat_charge
+    register_type: read
+    address: 10
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Battery Discharge"
+    id: bat_discharge
+    register_type: read
+    address: 11
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+    on_value:
+      lambda: |-
+        id(battery_power).publish_state(id(bat_charge).state - x);
+
+  - platform: template
+    id: battery_power
+    name: "Battery Power"
+    #lambda: |-
+    #  return (id(bat_charge).state - id(bat_discharge).state);
+    #update_interval: 5s
+    unit_of_measurement: "W"
+    state_class: measurement
+    device_class: "power"
+    accuracy_decimals: 0
+  
+  - platform: total_daily_energy
+    id: battery_discharged
+    power_id: bat_discharge
+    name: 'Battery Discharged Today'
+    unit_of_measurement: 'kWh'
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
+  
+  - platform: total_daily_energy
+    id: battery_charged
+    power_id: bat_charge
+    name: 'Battery Charged Today'
+    unit_of_measurement: 'kWh'
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Off Grid Voltage"
+    id: eps_volt
+    register_type: read
+    address: 20
+    register_count: 3
+    unit_of_measurement: "V"
+    state_class: measurement
+    accuracy_decimals: 1
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters:
+      - multiply: 0.1
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Off Grid Frequency"
+    id: eps_freq
+    register_type: read
+    address: 23
+    unit_of_measurement: Hz
+    state_class: measurement
+    accuracy_decimals: 2
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters:
+      - multiply: 0.01
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Eps Power"
+    id: eps_power
+    register_type: read
+    address: 24
+    register_count: 4
+    unit_of_measurement: W
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+    internal: True
+  
+  - platform: template
+    name: "Off Grid Power"
+    id: off_grid_power
+    # published from modbus gen_power
+    unit_of_measurement: W
+    state_class: measurement
+    device_class: "power"
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV TinyHouse Energy Today"
+    id: pv_th_energy_today
+    register_type: read
+    address: 28
+    unit_of_measurement: kWh
+    accuracy_decimals: 1
+    state_class: total_increasing
+    device_class: energy
+    value_type: U_WORD
+    filters:
+      - multiply: 0.1
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "PV CarPort Energy Today"
+    id: pv_cp_energy_today
+    register_type: read
+    address: 29
+    unit_of_measurement: kWh
+    accuracy_decimals: 1
+    state_class: total_increasing
+    device_class: energy
+    value_type: U_WORD
+    filters:
+      - multiply: 0.1
+    on_value:
+      lambda: |-
+        id(pv_total_energy_today).publish_state(id(pv_th_energy_today).state + x);
+  
+  - platform: template
+    name: "PV Total Energy Today"
+    id: pv_total_energy_today
+    unit_of_measurement: kWh
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 1
+    #lambda: |-
+    #  return (id(pv_th_energy_today).state + id(pv_cp_energy_today).state);
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Temperature Internal"
+    id: temp_internal
+    register_type: read
+    address: 64
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Temperature Radiator 1"
+    id: temp_radiator1
+    register_type: read
+    address: 65
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Temperature Radiator 2"
+    id: temp_radiator2
+    register_type: read
+    address: 66
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    #name: "AC Couple Enabled"
+    name: "AC coupling type"
+    register_type: read
+    address: 77
+    register_count: 3
+    internal: True
+    on_value:
+      - lambda: |-
+          std::string str;
+          uint16_t word = static_cast<uint16_t>(x);
+          ESP_LOGD("sensor", "Register 77: 0X%04X", word);
+          if (word & 0x1) {
+            str = "Generator";
+          } else {
+            str = "Grid";
+          }
+          id(ac_input_type).publish_state(str);
+          if (word & 0x2) {
+            str = "Show Flow";
+          } else {
+            str = "No Flow";
+          }
+          id(ac_couple_flow).publish_state(str);
+          //bitmask: 0x02 #(bit 8)
+          if (word & 0x4) {
+            str = "Enabled";
+          } else {
+            str = "Disabled";
+          }
+          id(ac_couple_enabled).publish_state(str);
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Battery Type and Brand"
+    register_type: read
+    address: 80
+    internal: True
+    on_value:
+      - lambda: |-
+          uint16_t word = static_cast<uint16_t>(x);
+          uint8_t com_type = (word >> 8) & 0xFF;
+          uint8_t battery_type = word & 0xFF;
+          std::string com_type_s = (com_type) ? "RS485" : "CAN";
+          id(battery_com_type).publish_state(com_type_s);
+          std::string battery_type_s = "undefined";
+          if (battery_type == 0) {battery_type_s = "Standard Protocol/Zetara/EG4";}
+          if (battery_type == 1) {battery_type_s =  "HINAESS Battery";}
+          if (battery_type == 2) {battery_type_s =  "Pylontech/ UZ Energy";}
+          if (battery_type == 5) {battery_type_s =  "GSL1 Battery";}
+          if (battery_type == 6) {battery_type_s =  "Lux Protocol";}
+          if (battery_type == 18) {battery_type_s =  "Fortress Battery";}
+          if (battery_type == 19) {battery_type_s =  "Sunwoda Battery";}
+          id(battery_make).publish_state(battery_type_s);
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Max Charge Current BMS"
+    id: max_charge_cur
+    register_type: read
+    address: 81
+    unit_of_measurement: "A"
+    state_class: measurement
+    value_type: U_WORD
+    entity_category: diagnostic
+    filters: 
+      - multiply: 0.01
+      - lambda: return x * 10;
+          
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Max Discharge Current BMS"
+    id: max_discharge_current
+    register_type: read
+    address: 82
+    unit_of_measurement: "A"
+    state_class: measurement
+    entity_category: diagnostic
+    value_type: U_WORD
+    filters: 
+      - multiply: 0.01
+      - lambda: return x * 10;
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Battery Capacity"
+    id: bat_cap
+    register_type: read
+    address: 97
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    value_type: U_WORD
+    entity_category: diagnostic
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Battery Current BMS"
+    id: bat_cur
+    register_type: read
+    address: 98
+    # register_count: 3
+    unit_of_measurement: "A"
+    state_class: measurement
+    accuracy_decimals: 2
+    value_type: S_WORD
+    entity_category: diagnostic
+    filters: 
+      - multiply: 0.01
+      - lambda: return x * 10;
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1
+  #   name: "Cell Max Volt"
+  #   id: cell_max_volt
+  #   register_type: read
+  #   address: 101
+  #   unit_of_measurement: "V"
+  #   accuracy_decimals: 3
+  #   state_class: measurement
+  #   value_type: U_WORD
+  #   entity_category: diagnostic
+  #   filters: 
+  #     - multiply: 0.001
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1 
+  #   name: "Cell Max Temp"
+  #   id: cell_max_temp
+  #   register_type: read
+  #   address: 103
+  #   device_class: temperature
+  #   unit_of_measurement: "°C"
+  #   state_class: measurement
+  #   value_type: S_WORD
+  #   filters: 
+  #     - multiply: 0.1
+    
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Generator Power"
+    id: gen_power
+    register_type: read
+    address: 123
+    unit_of_measurement: W
+    state_class: measurement
+    device_class: "power"
+    value_type: U_WORD
+    on_value:
+      lambda: |-
+        int battery_power = id(bat_charge).state - id(bat_discharge).state;
+        id(off_grid_power).publish_state(x - battery_power + id(pv_total_pow).state);
+    
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Generator Energy Today"
+    id: gen_total_energy_today
+    register_type: read
+    address: 124
+    unit_of_measurement: kWh
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 1
+    value_type: U_WORD
+    filters: 
+      - multiply: 0.1
+  
+  - platform: total_daily_energy
+    #power: power
+    id: total_daily_eps_energy
+    power_id: eps_power
+    name: 'Total Daily Energy Consumed'
+    unit_of_measurement: 'kWh'
+    state_class: total_increasing
+    device_class: energy
+    accuracy_decimals: 3
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
+
+text_sensor:
+
+  # - platform: template
+  #   name: "Current Date and Time"
+  #   lambda: |-
+  #     char str[30];
+  #     time_t now = id(homeassistant_time).now().timestamp;
+  #     strftime(str, sizeof(str), "%Y-%m-%d %H:%M:%S", localtime(&now));
+  #     return {str};    
+  #   update_interval: 60s
+
+  - platform: template
+    name: "Inverter Status"
+    id: status_string
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Date and Time from Inverter"
+    id: inv_date_time
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Last Time Sync"
+    id: time_last_synced
+    entity_category: diagnostic
+
+  - platform: template
+    name: "AC Input Type"
+    id: ac_input_type
+    entity_category: diagnostic
+
+  - platform: template
+    name: "AC Couple Inv Flow"
+    id: ac_couple_flow
+    entity_category: diagnostic
+
+  - platform: template
+    name: "AC Couple Enabled"
+    id: ac_couple_enabled
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Battery Make"
+    id: battery_make
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Battery COM"
+    id: battery_com_type
+    entity_category: diagnostic
+
+button:
+  - platform: template
+    id: sync_time
+    name: "Sync Time"
+    entity_category: CONFIG
+    on_press: 
+      then: 
+        - number.set:
+            id: minute_and_second
+            value: !lambda |- 
+              auto now = id(homeassistant_time).now(); 
+              uint8_t minute = now.minute;
+              uint8_t second = now.second;
+              uint16_t minute_second = (second << 8) + minute;
+              ESP_LOGD("Sync Time", "Calculated minute_and_second = %04d", minute_second);
+              ESP_LOGD("Sync Time", "Inverter minute_and_second = %04d", static_cast<uint16_t>(id(minute_and_second).state));
+              return minute_second;
+        - number.set:
+            id: day_and_hour
+            value: !lambda |- 
+              auto now = id(homeassistant_time).now(); 
+              uint8_t day = now.day_of_month;
+              uint8_t hour = now.hour;
+              uint16_t day_hour = (hour << 8) + day;
+              ESP_LOGD("Sync Time", "Calculated day_and_hour = %04d", day_hour);
+              ESP_LOGD("Sync Time", "Inverter day_and_hour = %04d", static_cast<uint16_t>(id(day_and_hour).state));
+              return day_hour;
+        - number.set:
+            id: year_and_month
+            value: !lambda |- 
+              auto now = id(homeassistant_time).now();
+              uint8_t year = now.year - 2000;
+              uint8_t month = now.month;
+              uint16_t year_month = (month << 8) + year;
+              ESP_LOGD("Sync Time", "Calculated year_and_month = %04d", year_month);
+              ESP_LOGD("Sync Time", "Inverter year_and_month = %04d", static_cast<uint16_t>(id(year_and_month).state));
+              return year_month;
+        - lambda: |-
+            char str[30];
+            time_t now = id(homeassistant_time).now().timestamp;
+            strftime(str, sizeof(str), "%Y-%m-%d %H:%M:%S", localtime(&now));    
+            id(time_last_synced).publish_state(str);
+
+number:  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Year and Month"
+    id: year_and_month
+    register_type: holding
+    address: 12
+    value_type: U_WORD
+    min_value: 0
+    max_value: 65535
+    step: 1
+    internal: True
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Day and Hour"
+    id: day_and_hour
+    register_type: holding
+    address: 13
+    value_type: U_WORD
+    min_value: 0
+    max_value: 65535
+    step: 1
+    internal: True
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Minute and Second"
+    id: minute_and_second
+    register_type: holding
+    address: 14
+    value_type: U_WORD
+    min_value: 0
+    max_value: 65535
+    step: 1
+    internal: True
+    on_value:
+      lambda: |-
+        ESP_LOGD("number", "Reading year from: %f", id(year_and_month).state);
+        uint16_t word = static_cast<int>(id(year_and_month).state);
+        uint8_t year = word & 0xFF;
+        uint8_t month = (word >> 8) & 0xFF;
+        word = static_cast<int>(id(day_and_hour).state);
+        uint8_t day = word & 0xFF;
+        uint8_t hour = (word >> 8) & 0xFF;
+        word = static_cast<int>(id(minute_and_second).state);
+        uint8_t minute = word & 0xFF;
+        uint8_t second = (word >> 8) & 0xFF;
+        char str[30];
+        snprintf(str, sizeof(str), "%04d-%02d-%02d %02d:%02d:%02d",
+                  year+2000, month, day,
+                  hour, minute, second);
+        ESP_LOGD("Time", "read followind datetime from luxpower: %s", str);
+        id(inv_date_time).publish_state(str);
+
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Generator Start SOC"
+    id: generator_start_soc
+    register_type: holding
+    address: 196
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 90
+    step: 5
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Generator Stop SOC"
+    id: generator_stop_soc
+    register_type: holding
+    address: 197
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    min_value: 20
+    max_value: 100
+    step: 5
+
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "AC Charge Limit"
+#    id: ac_charge_limit
+#    register_type: holding
+#    address: 67
+#    value_type: U_WORD
+#    unit_of_measurement: "%"
+#    min_value: 1
+#    max_value: 90
+#    step: 1
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1
+  #   name: "On Grid EOD SOC"
+  #   id: on_grid_eod_soc
+  #   register_type: holding
+  #   address: 105
+  #   value_type: U_WORD
+  #   unit_of_measurement: "%"
+  #   min_value: 10
+  #   max_value: 50
+  #   step: 1
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1
+  #   name: "Discharge Cut-off SOC"
+  #   id: discharge_cutoff_soc
+  #   register_type: holding
+  #   address: 125
+  #   value_type: U_WORD
+  #   unit_of_measurement: "%"
+  #   min_value: 10
+  #   max_value: 50
+  #   step: 1
+
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "Max Charge Current"
+#    id: max_charge_cur
+#    register_type: holding
+#    address: 101
+#    value_type: U_WORD
+#    unit_of_measurement: "A"
+#    min_value: 0
+#    max_value: 140
+#    step: 1
+
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "AC Charge Current"
+#    id: ac_charge_cur
+#    register_type: holding
+#    address: 168
+#    value_type: U_WORD
+#    unit_of_measurement: "A"
+#    min_value: 0
+#    max_value: 125
+#    step: 1
+
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "AC Charge Start"
+#    id: ac_charge_start
+#    register_type: holding
+#    address: 160
+#    value_type: U_WORD
+#    unit_of_measurement: "%"
+#    min_value: 1
+#    max_value: 90
+#    step: 1
+    
+
+#  - platform: modbus_controller
+#    modbus_controller_id: inverter_1
+#    name: "AC Charge Stop"
+#    id: ac_charge_stop
+#    register_type: holding
+#    address: 161
+#    value_type: U_WORD
+#    unit_of_measurement: "%"
+#    min_value: 20
+#    max_value: 100
+#    step: 1
+
+
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1
+  #   name: "Fault Code"
+  #   id: fault
+  #   register_type: holding
+  #   address: 60
+  #   register_count: 2
+  #   response_size: 2
+  #   raw_encode: NONE
+  #   entity_category: diagnostic
+
+  # - platform: modbus_controller
+  #   modbus_controller_id: inverter_1
+  #   name: "Warning Code"
+  #   id: warning
+  #   register_type: read
+  #   address: 62
+  #   register_count: 2
+  #   response_size: 2
+  #   raw_encode: NONE
+  #   entity_category: diagnostic
+
+light:
+  # Enable status LED
+  #- platform: status_led
+  #  output: status_output
+  #  name: "Status Led"
+  #  internal: True
+  - platform: neopixelbus
+    type: GRB
+    pin: GPIO27
+    num_leds: 1
+    variant: sk6812
+    name: "Atom RGB Light"
+    id: atom_light
+    # restore_mode: RESTORE_DEFAULT_OFF
+    effects:
+      - lambda:
+          name: "Breathing Effect"
+          update_interval: 150ms # Controls the smoothness of the fade
+          lambda: |-
+            static int step = 0;
+            const int step_limit = 20; 
+            float brightness;
+
+            // Calculate a sine wave to create a smooth brightness change
+            brightness = (sin(step * M_PI / step_limit) +1) *.40 + .1;
+
+            // Set the color and brightness
+            auto call = id(atom_light).turn_on();
+            if (id(conn_error)) {
+              call.set_rgb(1.0, 0.0, 0.0); 
+            } else{
+              call.set_rgb(0.0, 1.0, 0.0);
+            }
+            call.set_transition_length(150);
+            call.set_brightness(brightness);
+            call.set_publish(false);
+            call.set_save(false);
+            call.perform();            
+            step = ++step % (step_limit * 2);
+
+interval:
+  - interval: 1min
+    then:
+      # - lambda: |-
+      #     if (esphome::wifi::global_wifi_component->is_connected()) {
+      #       if (id(atom_light).get_effect_name() != "Breathing") {
+      #         ESP_LOGD("light", "Current Value of light effect is %s", id(atom_light).get_effect_name());
+      #         //id(atom_light).light_effect("Breathing").apply();
+      #       }
+      #       id(conn_error) = false;
+      #     } else {
+      #       id(conn_error) = true;
+      #     }
+      - if:
+          condition:
+            and:
+              - wifi.connected:
+              - api.connected:
+          then:
+            - logger.log: "WiFi and API connected."
+            - lambda: id(conn_error) = false; 
+          else:
+            - logger.log: "WiFi or API disconnected."
+            - lambda: id(conn_error) = true; 
+
+# output:
+#   - platform: template
+#     id: status_output
+#     type: binary
+#     write_action:
+#     - if:
+#         condition:
+#           lambda: return (state);
+#         then:
+#           - light.turn_on:
+#               id: atom_light
+#               brightness: 70%
+#               red: 100%
+#               green: 0%
+#               blue: 0%
+#         else:
+#           - light.turn_on: 
+#               id: atom_light
+#               brightness: 70%
+#               red: 0%
+#               green: 100%
+#               blue: 0%

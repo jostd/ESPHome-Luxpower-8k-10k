@@ -404,7 +404,7 @@ sensor:
   
   - platform: modbus_controller
     modbus_controller_id: inverter_1
-    name: "PV TinyHouse Energy Today"
+    name: PV ${pv1_name} Energy Today
     id: pv_th_energy_today
     register_type: read
     address: 28
@@ -418,7 +418,7 @@ sensor:
   
   - platform: modbus_controller
     modbus_controller_id: inverter_1
-    name: "PV CarPort Energy Today"
+    name: PV ${pv2_name} Energy Today
     id: pv_cp_energy_today
     register_type: read
     address: 29

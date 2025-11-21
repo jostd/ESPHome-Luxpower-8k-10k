@@ -9,8 +9,6 @@ esphome:
         - light.control:
             id: atom_light
             effect: "Breathing Effect"
-        - lambda: |-
-            id(bool_gen_fault).publish_state(false);
 
 esp32:
   # platform: ESP32
@@ -90,67 +88,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: '0'
-  - id: generator_starting
-    type: bool
-    restore_value: no
-    initial_value: '0'
-  # - id: generator_start_time
-  #   type: time
-  #   restore_value: yes
-  #   initial_value: '0'
-
-binary_sensor:
-  - platform: template
-    name: "Generator Running"
-    id: bool_gen_running
-    lambda: |-
-      return id(gen_volt).state > 0;
-  - platform: template
-    name: "Generator Fault"
-    id: bool_gen_fault
-
-output:
-  - platform: gpio
-    pin: GPIO26
-    id: generator_start_relay
-
-switch:
-  - platform: template
-    name: "Generator Switch"
-    id: generator_switch
-    turn_on_action:
-      - lambda: |-
-          if (!id(bool_gen_running).state) {
-            ESP_LOGD("generator", "Sending START signal to Generator");
-            id(generator_starting) = true;
-            id(bool_gen_fault).publish_state(false);
-            id(generator_start_timer).stop();
-            id(generator_start_timer).execute();
-            id(generator_start_relay).turn_on();
-            delay(2000);
-            id(generator_start_relay).turn_off();
-          }
-    turn_off_action:
-      - lambda: |-
-          if (id(bool_gen_running).state) {
-            ESP_LOGD("generator", "Sending STOP signal to Generator");
-            id(generator_starting) = false;
-            id(generator_start_relay).turn_on();
-            delay(2000);
-            id(generator_start_relay).turn_off();
-          }
-
-script:
-  - id: generator_start_timer
-    then:
-      - delay: 60s
-      - lambda: |-
-          id(generator_starting) = false;
-          if (!id(bool_gen_running).state) {
-            id(bool_gen_fault).publish_state(true);
-            id(generator_switch).publish_state(0);
-            ESP_LOGD("generator", "Generator failed to start. Setting fault state");
-          }
 
 modbus:
   - uart_id: uart_modbus_inverter_1
@@ -228,6 +165,7 @@ sensor:
           status = buffer;
         }
         id(status_string).publish_state(status);
+
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1
@@ -703,12 +641,6 @@ sensor:
     force_new_range: true
     filters: 
       - multiply: 0.1
-      - lambda: |-
-          if ( (x == 0) && (id(generator_switch).state == true) ) {
-            id(generator_switch).publish_state(0);
-            ESP_LOGD("generator", "Setting Generator Switch state to false");
-          }
-          return(x);
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1

@@ -103,8 +103,8 @@ binary_sensor:
   - platform: template
     name: "Generator Running"
     id: bool_gen_running
-    lambda: |-
-      return id(gen_volt).state > 0;
+    #lambda: |-
+    #  return id(gen_volt).state > 0;
   - platform: template
     name: "Generator Fault"
     id: bool_gen_fault
@@ -118,31 +118,45 @@ switch:
   - platform: template
     name: "Generator Switch"
     id: generator_switch
+    lambda: |-
+      if (id(generator_starting) || static_cast<bool>(id(bool_gen_running).state)) {
+        return true;
+      } else {
+        return false;
+      }
     turn_on_action:
-      - lambda: |-
-          if (!id(bool_gen_running).state) {
-            ESP_LOGD("generator", "Sending START signal to Generator");
-            id(generator_starting) = true;
-            id(bool_gen_fault).publish_state(false);
-            id(generator_start_timer).stop();
-            id(generator_start_timer).execute();
-            id(generator_start_relay).turn_on();
-            delay(2000);
-            id(generator_start_relay).turn_off();
-          }
+      - if:
+          condition:
+            lambda: 'return !id(bool_gen_running).state;'
+          then:
+            - lambda: |-
+                ESP_LOGD("generator", "Sending START signal to Generator");
+                id(generator_starting) = true;
+                id(bool_gen_fault).publish_state(false);
+                id(generator_start_timer).stop();
+                id(generator_start_timer).execute();
+                id(generator_start_relay).turn_on();
+            - delay: 2s
+            - lambda: |-
+                id(generator_start_relay).turn_off();
     turn_off_action:
-      - lambda: |-
-          if (id(bool_gen_running).state) {
-            ESP_LOGD("generator", "Sending STOP signal to Generator");
-            id(generator_starting) = false;
-            id(generator_start_relay).turn_on();
-            delay(2000);
-            id(generator_start_relay).turn_off();
-          }
+      - if:
+          condition:
+            lambda: 'return id(bool_gen_running).state;'
+          then:
+            - lambda: |-
+                ESP_LOGD("generator", "Sending STOP signal to Generator");
+                id(generator_starting) = false;
+                id(generator_start_relay).turn_on();
+            - delay: 2s
+            - lambda: |-
+                id(generator_start_relay).turn_off();
 
 script:
   - id: generator_start_timer
     then:
+      - lambda: |-
+          ESP_LOGD("generator", "starting timer for generator start");
       - delay: 60s
       - lambda: |-
           id(generator_starting) = false;
@@ -294,7 +308,28 @@ sensor:
       uint16_t word = static_cast<int>(x);
       id(battery_health_int) = (word >> 8) & 0xFF;
       ESP_LOGD("Battery", "Battery Register is 0X%X, SOH byte = %d, and SOC byte = %d", word, id(battery_health_int), word & 0xFF);
-      return word & 0xFF;
+      uint8_t soc = word & 0xFF;
+      uint16_t gstartsoc = static_cast<int>(id(generator_start_soc).state);
+      bool genfault = static_cast<bool>(id(bool_gen_fault).state);
+      //ESP_LOGD("generator", "generator_start_soc = %d", gstartsoc);
+      ESP_LOGD("generator", "soc = %d and generator_start_soc is %d and genfault is %d", soc, gstartsoc, genfault); //, (soc <= id(generator_start_soc).state));
+      if (soc <= gstartsoc) {
+        if (!genfault) {
+          id(generator_switch).turn_on();
+          ESP_LOGD("generator", "Starting generator because SOC(%d) is smaller than the start_soc", soc);
+        }
+      } else {
+        if (id(bool_gen_fault)) {
+          id(bool_gen_fault) = 0;
+        }
+      }
+      if (soc >= id(generator_stop_soc).state) {
+        if (id(bool_gen_running)) {
+          id(generator_switch).turn_off();
+          ESP_LOGD("generator", "Stopping generator because SOC(%d) is larger than the stop_soc", soc);
+        }
+      }
+      return soc;
     on_value:
       lambda: |-
         //uint16_t word = static_cast<int>(x);
@@ -705,9 +740,12 @@ sensor:
       - multiply: 0.1
       - lambda: |-
           if ( (x == 0) && (id(generator_switch).state == true) ) {
-            id(generator_switch).publish_state(0);
-            ESP_LOGD("generator", "Setting Generator Switch state to false");
+            if (!id(generator_starting)) {
+              id(generator_switch).publish_state(0);
+              ESP_LOGD("generator", "Setting Generator Switch state to false");
+            }
           }
+          id(bool_gen_running).publish_state(x > 0);
           return(x);
 
   - platform: modbus_controller
@@ -933,6 +971,9 @@ number:
     max_value: 90
     step: 5
     skip_updates: 5
+    lambda: |-
+      ESP_LOGD("generator", "reading generator_start_soc as %d", x);
+      return x;
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1

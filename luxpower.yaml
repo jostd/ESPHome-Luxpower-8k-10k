@@ -9,16 +9,19 @@ esphome:
         - light.control:
             id: atom_light
             effect: "Breathing Effect"
+        - binary_sensor.template.publish: 
+            id: bool_gen_fault
+            state: false
 
 esp32:
   # platform: ESP32
   board: m5stack-atom
   framework:
-    type: esp-idf
+    type: arduino
 
 # Enable logging
 logger:
-  #level: INFO
+  level: INFO 
   logs:
     light: NONE
 
@@ -53,6 +56,7 @@ uart:
     stop_bits: 1
     parity: NONE
     data_bits: 8
+    rx_buffer_size: 1024
 
 time:
   - platform: homeassistant
@@ -88,10 +92,156 @@ globals:
     type: bool
     restore_value: no
     initial_value: '0'
+  - id: generator_starting
+    type: bool
+    restore_value: no
+    initial_value: '0'
+  - id: charge_current_initialized
+    type: bool
+    restore_value: no
+    initial_value: '0'
+  # - id: generator_start_time
+  #   type: time
+  #   restore_value: yes
+  #   initial_value: '0'
+
+binary_sensor:
+  - platform: template
+    name: "Generator Running"
+    id: bool_gen_running
+    #lambda: |-
+    #  return id(gen_volt).state > 0;
+  - platform: template
+    name: "Generator Fault"
+    id: bool_gen_fault
+
+output:
+  - platform: gpio
+    pin: GPIO32
+    id: generator_start_relay
+
+switch:
+  - platform: output
+    name: "GPIO 32 Switch"
+    id: generator_start_switch
+    output: generator_start_relay
+    restore_mode: RESTORE_DEFAULT_OFF
+    internal: True
+
+  - platform: template
+    name: "Generator Switch"
+    id: generator_switch
+    lambda: |-
+      if (id(generator_starting) || static_cast<bool>(id(bool_gen_running).state)) {
+        return true;
+      } else {
+        return false;
+      }
+    turn_on_action:
+      - logger.log: "Sending START signal to Generator"
+      - globals.set:
+          id: generator_starting
+          value: 'true'
+      - binary_sensor.template.publish: 
+          id: bool_gen_fault
+          state: false
+      - switch.turn_on: generator_start_switch
+      #- script.stop: generator_start_timer
+      # - lambda: |-
+      #     //ESP_LOGD("generator", "Sending START signal to Generator");
+      #     id(generator_starting) = true;
+      #     id(bool_gen_fault).publish_state(false);
+      #     //id(generator_start_timer).stop();
+      #     //id(generator_start_timer).execute();
+      #     id(generator_start_relay).turn_on();
+      - delay: 200ms
+      - switch.turn_off: generator_start_switch
+      - script.execute: generator_start_timer
+
+    turn_off_action:
+      - logger.log: 
+          format: "Generator Switch Off called with switch state = %d and cond = %d"
+          args: [ 'id(generator_switch).state', 'id(generator_switch).state == 0' ]
+          level: INFO
+      # - lambda: |-
+      #     ESP_LOGD("generator", "Sending STOP signal to Generator");
+      #     id(generator_starting) = false;
+      #     id(generator_start_relay).turn_on();
+      - script.execute: generator_stop
+
+script:
+  - id: generator_start_timer
+    then:
+      - logger.log: 
+          format: "Starting timer for generator start"
+          level: INFO
+      - delay: 30s
+      - globals.set:
+          id: generator_starting
+          value: 'false'
+      # - binary_sensor.template.publish:
+      #     id: bool_gen_fault
+      #     state: 'true'
+      - lambda: |-
+          bool running = static_cast<bool>(id(bool_gen_running).state);
+          if (!running) {
+            id(bool_gen_fault).publish_state(true);
+            ESP_LOGI("generator", "Generator failed to start. Setting fault state");
+          }
+      - logger.log: 
+          format: "Ending timer for generator start"
+          level: INFO
+
+  - id: generator_stop
+    then:
+      - logger.log: 
+          format: "Generator STOP called with switch state = %d and cond = %d"
+          args: [ 'id(generator_switch).state', 'id(generator_switch).state == 0' ]
+          level: INFO
+      - if:
+          condition:
+            - switch.is_on: generator_switch
+          then:
+            - logger.log: 
+                format: "Executing STOP because Generator Switch is on"
+                level: INFO
+            - logger.log: 
+                format: "Starting timer for generator stop"
+                level: INFO
+            - globals.set:
+                id: generator_starting
+                value: 'false'
+            - number.set:
+                id: generator_charge_current_actual
+                value: 0
+            - delay: 20s
+            - logger.log: 
+                format: "Stopping generator!"
+                level: INFO
+            - logger.log: 
+                format: "Generator STOP called with switch state = %d and cond = %d"
+                args: [ 'id(generator_switch).state', 'id(generator_switch).state == 0' ]
+                level: INFO
+            - switch.turn_on: generator_start_switch
+            - delay: 200ms
+            - switch.turn_off: generator_start_switch
+            - delay: 1s
+            - logger.log: 
+                format: "Restoring Generator Charge Current to %d"
+                args: [ 'id(generator_charge_current).state' ] 
+                level: INFO
+            - lambda: |-
+                auto call = id(generator_charge_current_actual).make_call();
+                call.set_value(id(generator_charge_current).state);
+                call.perform();
+            # - number.set:
+            #     id: generator_charge_current_actual
+            #     value: 54
 
 modbus:
   - uart_id: uart_modbus_inverter_1
     id: modbus_inverter_1
+    send_wait_time: 500ms
     #flow_control_pin: GPIO21
 
 modbus_controller:
@@ -232,11 +382,37 @@ sensor:
       uint16_t word = static_cast<int>(x);
       id(battery_health_int) = (word >> 8) & 0xFF;
       ESP_LOGD("Battery", "Battery Register is 0X%X, SOH byte = %d, and SOC byte = %d", word, id(battery_health_int), word & 0xFF);
+      //uint8_t soc = word & 0xFF;
       return word & 0xFF;
     on_value:
       lambda: |-
-        //uint16_t word = static_cast<int>(x);
+        uint16_t soc = static_cast<uint16_t>(id(bat_soc).state);
         id(battery_health).publish_state(id(battery_health_int));
+        uint16_t gstartsoc = static_cast<int>(id(generator_start_soc).state);
+        bool genfault = static_cast<bool>(id(bool_gen_fault).state);
+        bool running = static_cast<bool>(id(bool_gen_running).state);
+        bool switch_on = static_cast<bool>(id(generator_switch).state);
+        //ESP_LOGD("generator", "generator_start_soc = %d", gstartsoc);
+        //ESP_LOGD("generator", "soc = %d and generator_start_soc is %d and genfault is %d", soc, gstartsoc, genfault);      
+        if (soc <= gstartsoc) {
+          if (!genfault && !switch_on) {
+            id(generator_switch).turn_on();
+            ESP_LOGI("generator", "Starting generator because SOC(%d) is smaller than the start_soc", soc);
+          }
+        } else {
+          if (genfault) {
+            id(bool_gen_fault).publish_state(0);
+            ESP_LOGI("generator", "Resetting Generator Fault because SOC(%d) is larger than the start_soc", soc);
+          }
+        }
+        if (soc >= id(generator_stop_soc).state) {
+          //ESP_LOGI("generator", "bool_gen_running = %d", running);
+          //ESP_LOGI("generator", "switch is %d", switch_on);
+          if (running && switch_on) {
+            id(generator_switch).turn_off();
+            ESP_LOGI("generator", "Stopping generator because SOC(%d) is larger than the stop_soc", soc);
+          }
+        }
 
   - platform: template
     name: "Battery Health"
@@ -445,6 +621,62 @@ sensor:
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1 
+    name: "FaultCode L"
+    id: fault_code_l
+    register_type: read
+    address: 60
+    #device_class: temperature
+    #state_class: measurement
+    #unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+    skip_updates: 5
+    force_new_range: true
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "FaultCode H"
+    id: fault_code_h
+    register_type: read
+    address: 61
+    #device_class: temperature
+    #state_class: measurement
+    #unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+    skip_updates: 5
+    force_new_range: true
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Warning Code L"
+    id: warning_code_l
+    register_type: read
+    address: 62
+    #device_class: temperature
+    #state_class: measurement
+    #unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+    skip_updates: 5
+    force_new_range: true
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
+    name: "Warning Code H"
+    id: warning_code_h
+    register_type: read
+    address: 63
+    #device_class: temperature
+    #state_class: measurement
+    #unit_of_measurement: "°C"
+    entity_category: diagnostic
+    value_type: S_WORD
+    skip_updates: 5
+    force_new_range: true
+
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1 
     name: "Temperature Internal"
     id: temp_internal
     register_type: read
@@ -455,7 +687,7 @@ sensor:
     entity_category: diagnostic
     value_type: S_WORD
     skip_updates: 5
-    force_new_range: true
+    #force_new_range: true
   
   - platform: modbus_controller
     modbus_controller_id: inverter_1 
@@ -641,6 +873,16 @@ sensor:
     force_new_range: true
     filters: 
       - multiply: 0.1
+    on_value:
+      - lambda: |-
+          if ( (static_cast<bool>(x) == 0) && (static_cast<bool>(id(generator_switch).state) == true) ) {
+            if (!id(generator_starting)) {
+              id(generator_switch).publish_state(0);
+              ESP_LOGD("generator", "Setting Generator Switch state to false");
+            }
+          }
+          id(bool_gen_running).publish_state(x > 0);
+
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1
@@ -781,7 +1023,38 @@ button:
             strftime(str, sizeof(str), "%Y-%m-%d %H:%M:%S", localtime(&now));    
             id(time_last_synced).publish_state(str);
 
+  - platform: template
+    id: reset_fault_button
+    name: "Reset Fault"
+    entity_category: CONFIG
+    on_press: 
+      then: 
+        - number.set:
+            id: reset_fault
+            value: !lambda |- 
+              ESP_LOGD("reset", "resetting faults");
+              uint16_t reset_code = 8;
+              return reset_code;
+
+  - platform: restart
+    name: "Atom_Restart"
+    id: atomrestart
+
+
 number:  
+  - platform: modbus_controller
+    modbus_controller_id: inverter_1
+    name: "Reset Fault"
+    id: reset_fault
+    register_type: holding
+    address: 11
+    value_type: U_WORD
+    min_value: 0
+    max_value: 65535
+    step: 1
+    skip_updates: 5
+    internal: True
+
   - platform: modbus_controller
     modbus_controller_id: inverter_1
     name: "Year and Month"
@@ -848,10 +1121,12 @@ number:
     address: 177
     value_type: U_WORD
     unit_of_measurement: "W"
-    min_value: 0
-    max_value: 11000
+    min_value: 0.0
+    max_value: 11000.0
     step: 100
     skip_updates: 5
+    lambda: 'return x*0.1;'
+    write_lambda: 'return x*10;'
 
   - platform: modbus_controller
     modbus_controller_id: inverter_1
@@ -881,17 +1156,39 @@ number:
     
   - platform: modbus_controller
     modbus_controller_id: inverter_1
-    name: "Generator Charge Current"
-    id: generator_charge_current
+    name: "Generator Charge Current Actual"
+    id: generator_charge_current_actual
     register_type: holding
     address: 198
     value_type: U_WORD
     unit_of_measurement: "A"
-    min_value: 1
+    min_value: 0
     max_value: 60
     step: 1
     skip_updates: 5
+    internal: True
+    on_value:
+      - lambda: |-
+          if (!static_cast<bool>(id(charge_current_initialized))) {
+            id(generator_charge_current).publish_state(x);
+            id(charge_current_initialized) = true;
+          }
 
+  - platform: template
+    name: "Generator Charge Current"
+    id: generator_charge_current
+    unit_of_measurement: "A"
+    min_value: 0
+    max_value: 60
+    step: 1
+    initial_value: 50
+    set_action:
+      - lambda: |-
+          auto call = id(generator_charge_current_actual).make_call();
+          call.set_value(x);
+          call.perform();
+          id(generator_charge_current).publish_state(x);
+          
 #  - platform: modbus_controller
 #    modbus_controller_id: inverter_1
 #    name: "AC Charge Limit"
